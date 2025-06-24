@@ -1,0 +1,45 @@
+[
+    {
+        "id": 1,
+        "coordenada_origen": {
+            "x": 18,
+            "y": 18
+        },
+        "coordenada_destino": {
+            "x": null,
+            "y": null,
+            "id": ""
+        },
+        "estado": "verde",
+        "disponible": true,
+        "verificado": true,
+        "recogido": false,
+        "cliente": {
+            "x": null,
+            "y": null,
+            "id_cliente": ""
+        }
+    },
+    {
+        "id": 2,
+        "coordenada_origen": {
+            "x": 20,
+            "y": 20
+        },
+        "coordenada_destino": {
+            "x": null,
+            "y": null,
+            "id": ""
+        },
+        "estado": "verde",
+        "disponible": true,
+        "verificado": true,
+        "recogido": false,
+        "returning_to_base": false,
+        "cliente": {
+            "x": null,
+            "y": null,
+            "id_cliente": ""
+        }
+    }
+]
