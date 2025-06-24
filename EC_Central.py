@@ -14,10 +14,28 @@ from matplotlib.animation import FuncAnimation
 from flask import Flask, jsonify, render_template, request
 from cryptography.fernet import Fernet
 import os
+import secrets
 from dotenv import load_dotenv
 
 # Cargar variables de entorno desde .env
 load_dotenv()
+
+# Clave simétrica para cifrado de comunicaciones con los taxis
+FERNET_KEY = os.getenv('FERNET_KEY')
+if not FERNET_KEY:
+    raise ValueError('FERNET_KEY not found in environment')
+fernet = Fernet(FERNET_KEY)
+
+# Configuración opcional de SSL para Kafka
+KAFKA_SECURITY_PROTOCOL = os.getenv('KAFKA_SECURITY_PROTOCOL', 'PLAINTEXT').upper()
+SSL_KWARGS = {}
+if KAFKA_SECURITY_PROTOCOL == 'SSL':
+    SSL_KWARGS = {
+        'security_protocol': 'SSL',
+        'ssl_cafile': os.getenv('KAFKA_SSL_CAFILE'),
+        'ssl_certfile': os.getenv('KAFKA_SSL_CERTFILE'),
+        'ssl_keyfile': os.getenv('KAFKA_SSL_KEYFILE'),
+    }
 
 # Constantes de los tópicos de Kafka
 TOPIC_SOLICITUDES_TAXIS = 'solicitudes-taxis' #consume solicitudes de clientes para que les recojan
@@ -91,21 +109,24 @@ class ECCentral:
         self.front_port = int(front_port)
         
         self.kafka_consumer_taxi = KafkaConsumer(
-            TOPIC_TAXI_UPDATES, 
+            TOPIC_TAXI_UPDATES,
             bootstrap_servers=self.kafka_ip_port,
             group_id='central_taxi_group',
             auto_offset_reset='latest',
-            value_deserializer=lambda v: json.loads(v.decode('utf-8'))
+            value_deserializer=lambda v: json.loads(v.decode('utf-8')),
+            **SSL_KWARGS
         )
         
         self.producer_taxicommands = KafkaProducer(
-            bootstrap_servers=kafka_ip_port, 
-            value_serializer=lambda v: json.dumps(v).encode('utf-8')
+            bootstrap_servers=kafka_ip_port,
+            value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+            **SSL_KWARGS
             )
 
         self.producer_customer = KafkaProducer(
             bootstrap_servers=kafka_ip_port,
-            value_serializer=lambda v: json.dumps(v).encode('utf-8')
+            value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+            **SSL_KWARGS
         )
 
         self.consumer_customer = KafkaConsumer(
@@ -113,7 +134,8 @@ class ECCentral:
             bootstrap_servers=kafka_ip_port,
             group_id='central_customer_group',
             auto_offset_reset='latest',
-            value_deserializer=lambda v: json.loads(v.decode('utf-8'))
+            value_deserializer=lambda v: json.loads(v.decode('utf-8')),
+            **SSL_KWARGS
         )
 
         self.consumer_taxi_end = KafkaConsumer(
@@ -121,7 +143,8 @@ class ECCentral:
             bootstrap_servers=kafka_ip_port,
             group_id='taxi_end_group',
             auto_offset_reset='latest',
-            value_deserializer=lambda v: json.loads(v.decode('utf-8'))
+            value_deserializer=lambda v: json.loads(v.decode('utf-8')),
+            **SSL_KWARGS
         )
 
     #ok
@@ -159,6 +182,13 @@ class ECCentral:
             if taxi["id"] == id_taxi:
                 return True
         return False
+
+    def verify_token(self, taxi_id, token):
+        taxis = self.load_file(self.taxi_bd)
+        for taxi in taxis:
+            if taxi["id"] == taxi_id:
+                return taxi.get("token") == token
+        return False
     
 
     def listen_taxi_updates(self):
@@ -168,11 +198,15 @@ class ECCentral:
             data = msg.value
             print(f"Received taxi update: {data}")
             parts = data.split('#')
-            if len(parts) >= 4:
+            if len(parts) >= 5:
                 taxi_id = int(parts[0])
-                status = parts[1]
-                taxiX = int(parts[2])
-                taxiY = int(parts[3])
+                token = parts[1]
+                status = parts[2]
+                taxiX = int(parts[3])
+                taxiY = int(parts[4])
+                if not self.verify_token(taxi_id, token):
+                    print(f"Invalid token from taxi {taxi_id}")
+                    continue
                 taxis = self.load_file(self.taxi_bd)
                 for taxi in taxis:
                     if taxi['id'] == taxi_id:
@@ -231,6 +265,10 @@ class ECCentral:
                     mensajes = mensaje.split('#')
                     taxi_id = int(mensajes[1])
                     cliente_id = mensajes[3]
+                    token = mensajes[-1]
+                    if not self.verify_token(taxi_id, token):
+                        print(f"Invalid token in end message from taxi {taxi_id}")
+                        continue
                     taxis = self.load_file(self.taxi_bd)
                     mapa = self.load_file('Mapa.json')
                     
@@ -262,7 +300,8 @@ class ECCentral:
             if taxi['id'] == taxi_id:
                 coordenada_destino = taxi['coordenada_destino']
                 cliente = taxi['cliente']
-                mensaje = f"Taxi has to go to#{taxi_id}#{coordenada_destino['x']}#{coordenada_destino['y']}#{cliente['x']}#{cliente['y']}#{cliente['id_cliente']}"
+                token = taxi.get('token', '')
+                mensaje = f"Taxi has to go to#{taxi_id}#{coordenada_destino['x']}#{coordenada_destino['y']}#{cliente['x']}#{cliente['y']}#{cliente['id_cliente']}#{token}"
                 print(f"sent to EC_DE: {mensaje}")
                 
                 producer.send(kafka_topic, value=mensaje)
@@ -285,29 +324,33 @@ class ECCentral:
         print(f"[NEW CONN] {addr} connected.")
     
         while True:
-            msg_length = conn.recv(64).decode('utf-8')
+            msg_length = conn.recv(64)
             if not msg_length:
                 break
-            msg_length = int(msg_length)
-            msg = conn.recv(msg_length).decode('utf-8')
+            msg_length = int(msg_length.decode('utf-8'))
+            encrypted = conn.recv(msg_length)
+            msg = fernet.decrypt(encrypted).decode('utf-8')
             taxis = self.load_file(self.taxi_bd)
             id_taxi = int(msg)
             exists = self.check_id(taxis, id_taxi)
             for taxi in taxis:
                 if taxi["id"] == id_taxi:
                     coordinates = taxi["coordenada_origen"]
-                    taxi['verificado'] = True 
+                    taxi['verificado'] = True
+                    token = secrets.token_hex(16)
+                    taxi['token'] = token
                     
                     print(f"my taxi ID is: {msg} and my coordinates are {coordinates}")
-            
+
             self.save_taxis_to_json(self.taxi_bd, taxis)
 
             response = ""
             if exists:
-                response += f"your coordinates are {coordinates}"
+                response_data = {'coordinates': coordinates, 'token': token}
+                response = json.dumps(response_data)
             else:
-                response += "ERROR taxi doesnt exist"
-            conn.send(response.encode('utf-8'))
+                response = "ERROR taxi doesnt exist"
+            conn.send(fernet.encrypt(response.encode('utf-8')))
         
         conn.close()
 
@@ -497,7 +540,7 @@ class ECCentral:
         taxis = self.load_file(self.taxi_bd)
         for taxi in taxis:
             if taxi['disponible'] and taxi['estado'] == 'verde':
-                command = f"RETURN_TO_BASE#{taxi['id']}"
+                command = f"RETURN_TO_BASE#{taxi['id']}#{taxi.get('token','')}"
                 self.producer_taxicommands.send(TOPIC_ASIGNACION_TAXIS, value=command)
                 print(f"Sent command to taxi {taxi['id']}: {command}")
 
@@ -505,7 +548,7 @@ class ECCentral:
         taxis = self.load_file(self.taxi_bd)
         for taxi in taxis:
             if taxi['estado'] == 'rojo':
-                command = f"RESUME_OPERATIONS#{taxi['id']}"
+                command = f"RESUME_OPERATIONS#{taxi['id']}#{taxi.get('token','')}"
                 self.producer_taxicommands.send(TOPIC_ASIGNACION_TAXIS, value=command)
                 print(f"Sent command to taxi {taxi['id']}: {command}")
     
