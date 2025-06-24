@@ -263,6 +263,20 @@ class ECCentral:
                     self.offset_taxi_end = msg.offset
                     
                     mensajes = mensaje.split('#')
+                    if mensajes[0] == 'taxi_returned':
+                        taxi_id = int(mensajes[1])
+                        token = mensajes[2]
+                        if not self.verify_token(taxi_id, token):
+                            print(f"Invalid return token from taxi {taxi_id}")
+                            continue
+                        taxis = self.load_file(self.taxi_bd)
+                        for taxi in taxis:
+                            if taxi['id'] == taxi_id:
+                                taxi['token'] = ''
+                                taxi['verificado'] = False
+                        self.save_taxis_to_json(self.taxi_bd, taxis)
+                        print(f"Taxi {taxi_id} back at base. Token removed.")
+                        continue
                     taxi_id = int(mensajes[1])
                     cliente_id = mensajes[3]
                     token = mensajes[-1]

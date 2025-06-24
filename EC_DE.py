@@ -296,7 +296,10 @@ class DigitalEngine:
                 self.status = 'KO'             # Cambiar el estado a 'KO'
                 self.returning_to_base = False # Dejar de supervisar
                 self.send_to_kafka(TOPIC_TAXI_UPDATES, f"{self.taxi_id}#{self.token}#KO#{self.position[0]}#{self.position[1]}")
-                print("Estado del taxi cambiado a 'KO'.")
+                # Avisar a la central de que el token deja de ser válido
+                self.producer_end.send(TOPIC_TAXI_END_CENTRAL, value=f"taxi_returned#{self.taxi_id}#{self.token}")
+                self.token = ""
+                print("Estado del taxi cambiado a 'KO'. Token invalidado.")
             else:
                 self.updateCoordinates()  # Mover el taxi hacia la base
                 self.send_to_kafka(TOPIC_TAXI_UPDATES, f"{self.taxi_id}#{self.token}#OK#{self.position[0]}#{self.position[1]}")
