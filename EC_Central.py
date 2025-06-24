@@ -46,12 +46,24 @@ TOPIC_TAXI_END_CENTRAL = 'taxi-end-central' #envia a central el fin de servicio
 
 TAXIS_FILE = "taxis.json" #esto no es buen codigo pero es una solucion temporal
 
+# Asegurar directorio de logs
+if not os.path.exists('LOGS'):
+    os.makedirs('LOGS')
+
 logging.basicConfig(
     filename='LOGS/central.log',  # Archivo donde se guardarán los logs
     level=logging.INFO,    # Nivel de registro
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%dT%H:%M:%S%z'
 )
+
+# Logger de auditoría de seguridad
+audit_logger = logging.getLogger('audit')
+audit_handler = logging.FileHandler('LOGS/audit.log')
+audit_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s',
+                                            datefmt='%Y-%m-%dT%H:%M:%S%z'))
+audit_logger.addHandler(audit_handler)
+audit_logger.setLevel(logging.INFO)
 
 app = Flask(__name__)
 
@@ -60,6 +72,10 @@ app = Flask(__name__)
 @app.route('/')
 def index():
     return render_template('map.html')
+
+@app.route('/audit')
+def audit_page():
+    return render_template('audit.html')
 
 @app.route('/get_taxis')
 def get_taxis():
@@ -72,6 +88,15 @@ def get_map():
     with open('mapa.json') as f:
         mapa = json.load(f)
     return jsonify(mapa)
+
+@app.route('/get_audit_logs')
+def get_audit_logs():
+    try:
+        with open('LOGS/audit.log') as f:
+            lines = f.readlines()[-100:]
+        return jsonify([l.strip() for l in lines])
+    except FileNotFoundError:
+        return jsonify([])
 
 #A BIT OF REGISTRY LOGIC
 
@@ -206,6 +231,7 @@ class ECCentral:
                 taxiY = int(parts[4])
                 if not self.verify_token(taxi_id, token):
                     print(f"Invalid token from taxi {taxi_id}")
+                    audit_logger.info(f"INVALID_TOKEN taxi={taxi_id}")
                     continue
                 taxis = self.load_file(self.taxi_bd)
                 for taxi in taxis:
@@ -268,6 +294,7 @@ class ECCentral:
                         token = mensajes[2]
                         if not self.verify_token(taxi_id, token):
                             print(f"Invalid return token from taxi {taxi_id}")
+                            audit_logger.info(f"INVALID_RETURN_TOKEN taxi={taxi_id}")
                             continue
                         taxis = self.load_file(self.taxi_bd)
                         for taxi in taxis:
@@ -275,6 +302,7 @@ class ECCentral:
                                 taxi['token'] = ''
                                 taxi['verificado'] = False
                         self.save_taxis_to_json(self.taxi_bd, taxis)
+                        audit_logger.info(f"TOKEN_EXPIRED taxi={taxi_id}")
                         print(f"Taxi {taxi_id} back at base. Token removed.")
                         continue
                     taxi_id = int(mensajes[1])
@@ -282,6 +310,7 @@ class ECCentral:
                     token = mensajes[-1]
                     if not self.verify_token(taxi_id, token):
                         print(f"Invalid token in end message from taxi {taxi_id}")
+                        audit_logger.info(f"INVALID_END_TOKEN taxi={taxi_id}")
                         continue
                     taxis = self.load_file(self.taxi_bd)
                     mapa = self.load_file('Mapa.json')
@@ -336,6 +365,7 @@ class ECCentral:
     #ok
     def socket_taxi(self, conn, addr):
         print(f"[NEW CONN] {addr} connected.")
+        audit_logger.info(f"CONNECTION from {addr[0]}")
     
         while True:
             msg_length = conn.recv(64)
@@ -353,6 +383,8 @@ class ECCentral:
                     taxi['verificado'] = True
                     token = secrets.token_hex(16)
                     taxi['token'] = token
+
+                    audit_logger.info(f"AUTH_SUCCESS taxi={id_taxi} ip={addr[0]}")
                     
                     print(f"my taxi ID is: {msg} and my coordinates are {coordinates}")
 
@@ -364,6 +396,7 @@ class ECCentral:
                 response = json.dumps(response_data)
             else:
                 response = "ERROR taxi doesnt exist"
+                audit_logger.info(f"AUTH_FAIL taxi={id_taxi} ip={addr[0]}")
             conn.send(fernet.encrypt(response.encode('utf-8')))
         
         conn.close()
@@ -556,6 +589,7 @@ class ECCentral:
             if taxi['disponible'] and taxi['estado'] == 'verde':
                 command = f"RETURN_TO_BASE#{taxi['id']}#{taxi.get('token','')}"
                 self.producer_taxicommands.send(TOPIC_ASIGNACION_TAXIS, value=command)
+                audit_logger.info(f"CMD_RETURN taxi={taxi['id']}")
                 print(f"Sent command to taxi {taxi['id']}: {command}")
 
     def resume_taxi_operations(self):
@@ -564,6 +598,7 @@ class ECCentral:
             if taxi['estado'] == 'rojo':
                 command = f"RESUME_OPERATIONS#{taxi['id']}#{taxi.get('token','')}"
                 self.producer_taxicommands.send(TOPIC_ASIGNACION_TAXIS, value=command)
+                audit_logger.info(f"CMD_RESUME taxi={taxi['id']}")
                 print(f"Sent command to taxi {taxi['id']}: {command}")
     
     def startFrontGraphics(self):

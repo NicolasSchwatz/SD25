@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Audit Log</title>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+</head>
+<body>
+    <h1>Audit Log</h1>
+    <pre id="log" style="background:#eee;padding:10px;height:400px;overflow:auto"></pre>
+    <script>
+    function loadLogs(){
+        $.getJSON('/get_audit_logs', function(data){
+            $('#log').text(data.join('\n'));
+        });
+    }
+    loadLogs();
+    setInterval(loadLogs, 2000);
+    </script>
+</body>
+</html>

@@ -16,3 +16,7 @@ OpenWeather.
 
 Cada taxi recibe un token temporal al autenticarse. Este token se incluye en los
 mensajes hacia la central y queda invalidado cuando el taxi regresa a la base.
+
+La Central genera un fichero `LOGS/audit.log` con los eventos de autenticación y
+comandos. Puede consultarse a través del endpoint `/get_audit_logs` o desde la
+página `/audit` que refresca la información periódicamente.
