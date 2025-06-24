@@ -26,6 +26,22 @@ HEADER = 64
 # Cargar variables de entorno desde .env
 load_dotenv()
 
+# Configuración de cifrado y Kafka
+FERNET_KEY = os.getenv('FERNET_KEY')
+if not FERNET_KEY:
+    raise ValueError('FERNET_KEY not found in environment')
+fernet = Fernet(FERNET_KEY)
+
+KAFKA_SECURITY_PROTOCOL = os.getenv('KAFKA_SECURITY_PROTOCOL', 'PLAINTEXT').upper()
+SSL_KWARGS = {}
+if KAFKA_SECURITY_PROTOCOL == 'SSL':
+    SSL_KWARGS = {
+        'security_protocol': 'SSL',
+        'ssl_cafile': os.getenv('KAFKA_SSL_CAFILE'),
+        'ssl_certfile': os.getenv('KAFKA_SSL_CERTFILE'),
+        'ssl_keyfile': os.getenv('KAFKA_SSL_KEYFILE'),
+    }
+
 def create_ssl_context(cert_path):
     """Create SSL context with certificate validation"""
     context = ssl.create_default_context(cafile=cert_path)
@@ -105,26 +121,28 @@ class DigitalEngine:
         self.ordered = False
         self.arrived = False
         self.client_id = ''
-        self.producer = KafkaProducer(bootstrap_servers=kafka_ip_port, value_serializer=lambda v: json.dumps(v).encode('utf-8'))
+        self.token = ''
+        self.producer = KafkaProducer(bootstrap_servers=kafka_ip_port, value_serializer=lambda v: json.dumps(v).encode('utf-8'), **SSL_KWARGS)
         self.sensor_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.producer_end = KafkaProducer(bootstrap_servers=kafka_ip_port, value_serializer=lambda v: json.dumps(v).encode('utf-8'))       
+        self.producer_end = KafkaProducer(bootstrap_servers=kafka_ip_port, value_serializer=lambda v: json.dumps(v).encode('utf-8'), **SSL_KWARGS)
         self.consumer = KafkaConsumer(
             TOPIC_ASIGNACION_TAXIS,
             bootstrap_servers=kafka_ip_port,
             group_id=f"taxi_{self.taxi_id}",
             auto_offset_reset='latest',
-            value_deserializer=lambda v: json.loads(v.decode('utf-8'))
+            value_deserializer=lambda v: json.loads(v.decode('utf-8')),
+            **SSL_KWARGS
         )
         self.returning_to_base = False  # Indica si el taxi está regresando a la base
 
 
     def send(self, msg, client):
-        message = msg.encode(FORMAT)
-        msg_length = len(message)
+        encrypted = fernet.encrypt(msg.encode(FORMAT))
+        msg_length = len(encrypted)
         send_length = str(msg_length).encode(FORMAT)
         send_length += b' ' * (HEADER - len(send_length))
         client.send(send_length)
-        client.send(message)
+        client.send(encrypted)
 
     def send_to_kafka(self, topic, message):
         try:
@@ -163,21 +181,20 @@ class DigitalEngine:
 
         print("Envio al servidor: ", self.taxi_id)
         self.send(str(self.taxi_id), client_socket)
-        
-        while True:
-            response = client_socket.recv(2048).decode('utf-8')
-            pattern = r"'x' ?: ?(\d+)[.,] ?'y' ?: ?(\d+)"
-            aux = re.search(pattern, response)
 
-            if aux:
-                self.position = [int(aux.group(1)), int(aux.group(2))]
-                print(f"Mi coordenada es {self.position}")
-            if response == "ERROR taxi doesnt exist":
+        while True:
+            encrypted = client_socket.recv(2048)
+            response = fernet.decrypt(encrypted).decode('utf-8')
+            if response.startswith('ERROR'):
                 print("ERROR: id not on our database, try again ")
                 sys.exit(1)
-            else:
-                print(f"Taxi {self.taxi_id} autenticado correctamente.")
-                break
+            data = json.loads(response)
+            self.position = [data['coordinates']['x'], data['coordinates']['y']]
+            self.token = data['token']
+            print(f"Mi coordenada es {self.position}")
+            print(f"Token recibido {self.token}")
+            print(f"Taxi {self.taxi_id} autenticado correctamente.")
+            break
         client_socket.close()
 
     def listen_asignacion_kafka(self):
@@ -188,10 +205,11 @@ class DigitalEngine:
             print(f"Command received from Central: {command}")
             auxArr = command.split("#")
 
-            if len(auxArr) >= 2:
+            if len(auxArr) >= 3:
                 command_type = auxArr[0]
                 Tid = int(auxArr[1])
-                if Tid == self.taxi_id:
+                token = auxArr[-1]
+                if Tid == self.taxi_id and token == self.token:
                     if command_type == "RETURN_TO_BASE":
                         self.return_to_base()
                     elif command_type == "RESUME_OPERATIONS":
@@ -220,21 +238,21 @@ class DigitalEngine:
                 if msg:
                     if msg == "KO":
                         self.status = "KO"
-                        self.send_to_kafka(TOPIC_TAXI_UPDATES,f"{self.taxi_id}#{msg}#{self.position[0]}#{self.position[1]}")
+                        self.send_to_kafka(TOPIC_TAXI_UPDATES,f"{self.taxi_id}#{self.token}#{msg}#{self.position[0]}#{self.position[1]}")
                         continue
                     if self.position == self.client_position and self.ordered:
                         self.inTaxi = True
                     
                     if self.inTaxi == False:
                         self.update_client_coordinates(self.position[0], self.position[1])
-                        self.send_to_kafka(TOPIC_TAXI_UPDATES, f"{self.taxi_id}#{msg}#{self.position[0]}#{self.position[1]}")
+                        self.send_to_kafka(TOPIC_TAXI_UPDATES, f"{self.taxi_id}#{self.token}#{msg}#{self.position[0]}#{self.position[1]}")
                     else:
                         print(f"Ordenado == {self.ordered} y arrived =={self.arrived}")
                         if self.ordered and not self.arrived and self.position == self.goal_position:
-                            self.send_to_kafka(TOPIC_TAXI_UPDATES, f"{self.taxi_id}#{msg}#{self.position[0]}#{self.position[1]}#destino")
+                            self.send_to_kafka(TOPIC_TAXI_UPDATES, f"{self.taxi_id}#{self.token}#{msg}#{self.position[0]}#{self.position[1]}#destino")
                             print("Service completed")
                             self.arrived = True
-                            aux = f"taxi#{self.taxi_id}#cliente#{self.client_id}#ha llegado a su destino"
+                            aux = f"taxi#{self.taxi_id}#cliente#{self.client_id}#ha llegado a su destino#{self.token}"
                             self.producer_end.send(TOPIC_TAXI_END_CENTRAL, value=aux)
                             self.producer_end.send(TOPIC_TAXI_END_CLIENT, value=aux)
 
@@ -246,7 +264,7 @@ class DigitalEngine:
                         
                         else:
                             self.updateCoordinates()
-                            self.send_to_kafka(TOPIC_TAXI_UPDATES,f"{self.taxi_id}#{msg}#{self.position[0]}#{self.position[1]}#recogido")
+                            self.send_to_kafka(TOPIC_TAXI_UPDATES,f"{self.taxi_id}#{self.token}#{msg}#{self.position[0]}#{self.position[1]}#recogido")
             except socket.error as error:
                 print(f"Error al recibir mensaje del Sensor: {error}") 
                 break
@@ -257,7 +275,7 @@ class DigitalEngine:
         self.available = True          # Marcar como disponible
         self.returning_to_base = False
         # Notificar a la central del cambio de estado
-        self.send_to_kafka(TOPIC_TAXI_UPDATES, f"{self.taxi_id}#OK#{self.position[0]}#{self.position[1]}")
+        self.send_to_kafka(TOPIC_TAXI_UPDATES, f"{self.taxi_id}#{self.token}#OK#{self.position[0]}#{self.position[1]}")
         print(f"Taxi {self.taxi_id} disponible para nuevos servicios.")
 
     def return_to_base(self):
@@ -277,11 +295,14 @@ class DigitalEngine:
                 print("Taxi ha llegado a la base.")
                 self.status = 'KO'             # Cambiar el estado a 'KO'
                 self.returning_to_base = False # Dejar de supervisar
-                self.send_to_kafka(TOPIC_TAXI_UPDATES, f"{self.taxi_id}#KO#{self.position[0]}#{self.position[1]}")
-                print("Estado del taxi cambiado a 'KO'.")
+                self.send_to_kafka(TOPIC_TAXI_UPDATES, f"{self.taxi_id}#{self.token}#KO#{self.position[0]}#{self.position[1]}")
+                # Avisar a la central de que el token deja de ser válido
+                self.producer_end.send(TOPIC_TAXI_END_CENTRAL, value=f"taxi_returned#{self.taxi_id}#{self.token}")
+                self.token = ""
+                print("Estado del taxi cambiado a 'KO'. Token invalidado.")
             else:
                 self.updateCoordinates()  # Mover el taxi hacia la base
-                self.send_to_kafka(TOPIC_TAXI_UPDATES, f"{self.taxi_id}#OK#{self.position[0]}#{self.position[1]}")
+                self.send_to_kafka(TOPIC_TAXI_UPDATES, f"{self.taxi_id}#{self.token}#OK#{self.position[0]}#{self.position[1]}")
             time.sleep(1)
 
 if __name__ == "__main__":

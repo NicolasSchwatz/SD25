@@ -10,6 +10,7 @@ import sys
 import logging  # Importar el módulo logging
 from dotenv import load_dotenv
 import os
+import openai
 from PyInquirer import prompt
 
 # Cargar variables de entorno desde .env
@@ -18,6 +19,9 @@ OPENWEATHER_API_KEY = os.getenv('OPENWEATHER_API_KEY')
 if not OPENWEATHER_API_KEY:
     print("Por favor, proporciona una API Key válida en el archivo .env con la clave OPENWEATHER_API_KEY.")
     sys.exit(1)
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
+if OPENAI_API_KEY:
+    openai.api_key = OPENAI_API_KEY
 
 # Configuración
 DEFAULT_CITY = 'Madrid'  # Ciudad por defecto
@@ -59,9 +63,20 @@ def determine_traffic_status(temp):
     """
     Determina el estado del tráfico basado en la temperatura.
     """
+    if OPENAI_API_KEY:
+        try:
+            prompt = f"La temperatura es {temp}°C. Indica si el trafico es seguro. Responde solo 'OK' o 'KO'."
+            response = openai.ChatCompletion.create(
+                model='gpt-3.5-turbo',
+                messages=[{'role': 'user', 'content': prompt}]
+            )
+            answer = response.choices[0].message['content'].strip().upper()
+            return 'OK' if 'OK' in answer else 'KO'
+        except Exception as e:
+            logging.error(f"Error al consultar ChatGPT: {e}")
     if temp is not None:
         return 'OK' if temp >= TEMPERATURE_THRESHOLD else 'KO'
-    return 'KO'  # Por defecto, si no se puede obtener la temperatura
+    return 'KO'
 
 @app.route('/get_traffic_status', methods=['GET'])
 def get_traffic_status_route():
